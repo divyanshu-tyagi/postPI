@@ -16,4 +16,8 @@ spring:
 server:
   port: 8080
 
+app:
+  jwt:
+    secret: "change-this-to-a-long-random-string-at-least-32-characters-for-hs256"
+    expiration-ms: 86400000
 #debug: true
