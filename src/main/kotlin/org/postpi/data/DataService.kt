@@ -1,10 +1,13 @@
 package org.postpi.data
 
+import org.postpi.policy.PolicyRepository
 import org.postpi.schema.SchemaIntrospector
 import org.postpi.schema.TableSchema
 import org.springframework.jdbc.core.namedparam.MapSqlParameterSource
 import org.springframework.jdbc.core.namedparam.NamedParameterJdbcTemplate
+import org.springframework.security.core.context.SecurityContextHolder
 import org.springframework.stereotype.Service
+import java.util.UUID
 
 class TableNotFoundException(tableName: String) :
     RuntimeException("Table '$tableName' does not exist or not accessible.")
@@ -15,6 +18,7 @@ class InvalidColumnException(columnName: String, tableName: String) :
 @Service
 class DataService (
     private val schemaIntrospector: SchemaIntrospector,
+    private val policyRepository: PolicyRepository,
     private val jdbcTemplate: NamedParameterJdbcTemplate
 ){
     fun findAll(tableName: String , params: Map<String, String>): List<Map<String , Any?>>{
@@ -35,6 +39,14 @@ class DataService (
             val paramName = "filterValue$index"
             whereClauses.add("\"${filter.column}\" = :$paramName")
             sqlParams.addValue(paramName, filter.value)
+        }
+
+        val policy = policyRepository.findPolicy(tableName, "SELECT")
+        if(policy != null){
+            val currentUserId = getCurrentUserId()
+                ?: throw IllegalStateException("Policy requires an authenticated user .")
+            whereClauses.add("\"${policy.columnName}\" = :currentUserId")
+            sqlParams.addValue("currentUserId", currentUserId)
         }
 
         val whereSql = if (whereClauses.isNotEmpty())
@@ -61,5 +73,9 @@ class DataService (
         if(columnName == null) return
         val exists = table.columns.any { it.columnName == columnName }
         if( !exists) throw InvalidColumnException(columnName , table.tableName)
+    }
+    private fun getCurrentUserId(): UUID? {
+        val principal = SecurityContextHolder.getContext().authentication?.principal
+        return principal as? UUID
     }
 }
