@@ -15,6 +15,10 @@ class TableNotFoundException(tableName: String) :
 class InvalidColumnException(columnName: String, tableName: String) :
     RuntimeException("Column '$columnName' does not exist in table '$tableName'")
 
+class RowNotFoundException(tableName: String, id: String) :
+    RuntimeException("Row with id '$id' not found in table '$tableName'")
+
+
 @Service
 class DataService (
     private val schemaIntrospector: SchemaIntrospector,
@@ -22,9 +26,7 @@ class DataService (
     private val jdbcTemplate: NamedParameterJdbcTemplate
 ){
     fun findAll(tableName: String , params: Map<String, String>): List<Map<String , Any?>>{
-        val schema = schemaIntrospector.introspect()
-        val table = schema.find { it.tableName == tableName }
-            ?: throw TableNotFoundException(tableName)
+        val table = requireTable(tableName)
 
         val pagination = Pagination.from(params)
         val filters = QueryFilter.parseAll(params)
@@ -49,9 +51,7 @@ class DataService (
             sqlParams.addValue("currentUserId", currentUserId)
         }
 
-        val whereSql = if (whereClauses.isNotEmpty())
-            "WHERE ${whereClauses.joinToString(" AND ")}"
-        else ""
+        val whereSql = buildWhereSql(whereClauses)
 
         val orderBySql = pagination.orderBy
             ?.let { "ORDER BY \"$it\"" }
@@ -69,6 +69,76 @@ class DataService (
 
         return jdbcTemplate.queryForList(sql, sqlParams)
     }
+
+    fun insert(tableName: String, body: Map<String,Any?>): Map<String, Any?>{
+        val table = requireTable(tableName)
+        body.keys.forEach { validateColumn(table, it) }
+
+        val insertData = body.toMutableMap()
+
+        val policy = policyRepository.findPolicy(tableName, "INSERT")
+        if(policy != null){
+            val currentUserId = getCurrentUserId()
+            insertData[policy.columnName] = currentUserId
+        }
+        val sqlParams = MapSqlParameterSource()
+        val columns = insertData.keys.toList()
+        columns.forEach { col -> sqlParams.addValue(col, insertData[col]) }
+
+        val columnList = columns.joinToString(", ") { "\"$it\"" }
+        val valueList = columns.joinToString(", ") { ":$it" }
+
+        val sql = """
+            INSERT INTO "${table.tableName}" ($columnList)
+            VALUES ($valueList)
+            RETURNING *
+        """.trimIndent()
+        return jdbcTemplate.queryForMap(sql, sqlParams)
+    }
+
+    fun update(tableName: String, id: String, body: Map<String, Any?>): Map<String, Any?>{
+        val table = requireTable(tableName)
+        body.keys.forEach { validateColumn(table, it) }
+
+        val sqlParams = MapSqlParameterSource()
+        val setClauses = body.keys.map { col ->
+            sqlParams.addValue(col, body[col])
+            "\"$col\" = :$col"
+        }
+        val whereClauses = mutableListOf("\"id\" = :id")
+        sqlParams.addValue("id", UUID.fromString(id))
+
+        applyPolicy(table, "UPDATE", whereClauses, sqlParams)
+        val sql = """
+            UPDATE "${table.tableName}"
+            SET ${setClauses.joinToString(", ")}
+            WHERE ${whereClauses.joinToString(" AND ")}
+            RETURNING *
+        """.trimIndent()
+
+        val results = jdbcTemplate.queryForList(sql, sqlParams)
+        return results.firstOrNull() ?: throw RowNotFoundException(tableName, id)
+    }
+
+    fun delete(tableName: String, id: String) {
+        val table = requireTable(tableName)
+
+        val sqlParams = MapSqlParameterSource()
+        val whereClauses = mutableListOf("\"id\" = :id")
+        sqlParams.addValue("id", UUID.fromString(id))
+
+        applyPolicy(table, "DELETE", whereClauses, sqlParams)
+
+        val sql = """
+            DELETE FROM "${table.tableName}"
+            WHERE ${whereClauses.joinToString(" AND ")}
+        """.trimIndent()
+
+        val rowsAffected = jdbcTemplate.update(sql, sqlParams)
+        if (rowsAffected == 0) throw RowNotFoundException(tableName, id)
+    }
+
+
     private fun validateColumn(table: TableSchema, columnName: String?){
         if(columnName == null) return
         val exists = table.columns.any { it.columnName == columnName }
@@ -77,5 +147,28 @@ class DataService (
     private fun getCurrentUserId(): UUID? {
         val principal = SecurityContextHolder.getContext().authentication?.principal
         return principal as? UUID
+            ?: throw IllegalStateException("This Operation requires an authenticated user .")
     }
+    private fun requireTable(tableName: String): TableSchema{
+        val schema = schemaIntrospector.introspect()
+        return  schema.find{ it.tableName == tableName}
+            ?: throw TableNotFoundException(tableName)
+    }
+
+    private fun applyPolicy(
+        table: TableSchema,
+        operation: String,
+        whereClauses: MutableList<String>,
+        sqlParams: MapSqlParameterSource
+    ){
+        val policy = policyRepository.findPolicy(table.tableName, operation) ?: return
+        val currentUserId = getCurrentUserId()
+        whereClauses.add("\"${policy.columnName}\" = :currentUserId")
+        sqlParams.addValue("currentUserId", currentUserId)
+    }
+
+    private fun buildWhereSql(whereClauses: List<String>): String =
+        if (whereClauses.isNotEmpty()) "WHERE ${whereClauses.joinToString(" AND ")}"
+        else ""
+
 }
