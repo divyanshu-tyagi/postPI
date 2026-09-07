@@ -1,5 +1,6 @@
 package org.postpi.data
 
+import org.postpi.apiKey.ApiKeyPrincipal
 import org.postpi.policy.PolicyRepository
 import org.postpi.schema.SchemaIntrospector
 import org.postpi.schema.TableSchema
@@ -44,8 +45,8 @@ class DataService (
         }
 
         val policy = policyRepository.findPolicy(tableName, "SELECT")
-        if(policy != null){
-            val currentUserId = getCurrentUserId()
+        if(policy != null && !isApiKeyPrincipal()){
+            val currentUserId = requireCurrentUserId()
                 ?: throw IllegalStateException("Policy requires an authenticated user .")
             whereClauses.add("\"${policy.columnName}\" = :currentUserId")
             sqlParams.addValue("currentUserId", currentUserId)
@@ -77,8 +78,8 @@ class DataService (
         val insertData = body.toMutableMap()
 
         val policy = policyRepository.findPolicy(tableName, "INSERT")
-        if(policy != null){
-            val currentUserId = getCurrentUserId()
+        if(policy != null && !isApiKeyPrincipal()){
+            val currentUserId = requireCurrentUserId()
             insertData[policy.columnName] = currentUserId
         }
         val sqlParams = MapSqlParameterSource()
@@ -144,10 +145,13 @@ class DataService (
         val exists = table.columns.any { it.columnName == columnName }
         if( !exists) throw InvalidColumnException(columnName , table.tableName)
     }
-    private fun getCurrentUserId(): UUID? {
+    private fun requireCurrentUserId(): UUID? {
         val principal = SecurityContextHolder.getContext().authentication?.principal
-        return principal as? UUID
-            ?: throw IllegalStateException("This Operation requires an authenticated user .")
+        return when(principal){
+            is UUID -> principal
+            else -> throw IllegalStateException("This Operation requires an authenticated user .")
+        }
+
     }
     private fun requireTable(tableName: String): TableSchema{
         val schema = schemaIntrospector.introspect()
@@ -162,13 +166,18 @@ class DataService (
         sqlParams: MapSqlParameterSource
     ){
         val policy = policyRepository.findPolicy(table.tableName, operation) ?: return
-        val currentUserId = getCurrentUserId()
+        if(isApiKeyPrincipal()) return
+        val currentUserId = requireCurrentUserId()
         whereClauses.add("\"${policy.columnName}\" = :currentUserId")
         sqlParams.addValue("currentUserId", currentUserId)
+    }
+
+    private fun isApiKeyPrincipal(): Boolean {
+        val principal = SecurityContextHolder.getContext().authentication?.principal
+        return principal is ApiKeyPrincipal
     }
 
     private fun buildWhereSql(whereClauses: List<String>): String =
         if (whereClauses.isNotEmpty()) "WHERE ${whereClauses.joinToString(" AND ")}"
         else ""
-
 }
