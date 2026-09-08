@@ -1,6 +1,7 @@
 package org.postpi.data
 
 import org.postpi.apiKey.ApiKeyPrincipal
+import org.postpi.audit.AuditLogService
 import org.postpi.policy.PolicyRepository
 import org.postpi.schema.SchemaIntrospector
 import org.postpi.schema.TableSchema
@@ -24,9 +25,10 @@ class RowNotFoundException(tableName: String, id: String) :
 class DataService (
     private val schemaIntrospector: SchemaIntrospector,
     private val policyRepository: PolicyRepository,
-    private val jdbcTemplate: NamedParameterJdbcTemplate
+    private val jdbcTemplate: NamedParameterJdbcTemplate,
+    private val auditLogService: AuditLogService
 ){
-    fun findAll(tableName: String , params: Map<String, String>): List<Map<String , Any?>>{
+    fun findAll(tableName: String, params: Map<String, String>): List<Map<String , Any?>>{
         val table = requireTable(tableName)
 
         val pagination = Pagination.from(params)
@@ -84,7 +86,17 @@ class DataService (
         }
         val sqlParams = MapSqlParameterSource()
         val columns = insertData.keys.toList()
-        columns.forEach { col -> sqlParams.addValue(col, insertData[col]) }
+       // columns.forEach { col -> sqlParams.addValue(col, insertData[col]) }
+        columns.forEach { col ->
+            val columnInfo = table.columns.find { it.columnName == col }
+            val rawValue = insertData[col]
+            val value = if (columnInfo?.dataType == "uuid" && rawValue is String) {
+                UUID.fromString(rawValue)
+            } else {
+                rawValue
+            }
+            sqlParams.addValue(col, value)
+        }
 
         val columnList = columns.joinToString(", ") { "\"$it\"" }
         val valueList = columns.joinToString(", ") { ":$it" }
@@ -94,8 +106,30 @@ class DataService (
             VALUES ($valueList)
             RETURNING *
         """.trimIndent()
-        return jdbcTemplate.queryForMap(sql, sqlParams)
+        val result =  jdbcTemplate.queryForMap(sql, sqlParams)
+        auditLogService.record(tableName, "INSERT", result["id"]?.toString())
+        return result
     }
+
+    fun delete(tableName: String, id: String) {
+        val table = requireTable(tableName)
+
+        val sqlParams = MapSqlParameterSource()
+        val whereClauses = mutableListOf("\"id\" = :id")
+        sqlParams.addValue("id", UUID.fromString(id))
+
+        applyPolicy(table, "DELETE", whereClauses, sqlParams)
+
+        val sql = """
+            DELETE FROM "${table.tableName}"
+            WHERE ${whereClauses.joinToString(" AND ")}
+        """.trimIndent()
+
+        val rowsAffected = jdbcTemplate.update(sql, sqlParams)
+        if (rowsAffected == 0) throw RowNotFoundException(tableName, id)
+        auditLogService.record(tableName, "DELETE", id)
+    }
+
 
     fun update(tableName: String, id: String, body: Map<String, Any?>): Map<String, Any?>{
         val table = requireTable(tableName)
@@ -118,27 +152,10 @@ class DataService (
         """.trimIndent()
 
         val results = jdbcTemplate.queryForList(sql, sqlParams)
-        return results.firstOrNull() ?: throw RowNotFoundException(tableName, id)
+        val result =  results.firstOrNull() ?: throw RowNotFoundException(tableName, id)
+        auditLogService.record(tableName, "UPDATE", id)
+        return result
     }
-
-    fun delete(tableName: String, id: String) {
-        val table = requireTable(tableName)
-
-        val sqlParams = MapSqlParameterSource()
-        val whereClauses = mutableListOf("\"id\" = :id")
-        sqlParams.addValue("id", UUID.fromString(id))
-
-        applyPolicy(table, "DELETE", whereClauses, sqlParams)
-
-        val sql = """
-            DELETE FROM "${table.tableName}"
-            WHERE ${whereClauses.joinToString(" AND ")}
-        """.trimIndent()
-
-        val rowsAffected = jdbcTemplate.update(sql, sqlParams)
-        if (rowsAffected == 0) throw RowNotFoundException(tableName, id)
-    }
-
 
     private fun validateColumn(table: TableSchema, columnName: String?){
         if(columnName == null) return
