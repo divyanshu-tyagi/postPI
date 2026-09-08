@@ -2,6 +2,7 @@ package org.postpi.config
 
 import org.postpi.apiKey.ApiKeyAuthFilter
 import org.postpi.auth.JwtAuthFilter
+import org.postpi.ratelimit.RateLimitFilter
 import org.springframework.context.annotation.Bean
 import org.springframework.context.annotation.Configuration
 import org.springframework.security.config.annotation.web.builders.HttpSecurity
@@ -14,7 +15,8 @@ import org.springframework.security.web.authentication.UsernamePasswordAuthentic
 @EnableWebSecurity
 class SecurityConfig (
     private val jwtAuthFilter: JwtAuthFilter,
-    private val apiKeyAuthFilter: ApiKeyAuthFilter
+    private val apiKeyAuthFilter: ApiKeyAuthFilter,
+    private val rateLimitFilter: RateLimitFilter
 ){
 
     @Bean
@@ -29,6 +31,7 @@ class SecurityConfig (
             }
             .addFilterBefore(jwtAuthFilter, UsernamePasswordAuthenticationFilter::class.java)
             .addFilterBefore(apiKeyAuthFilter, UsernamePasswordAuthenticationFilter::class.java)
+            .addFilterAfter(rateLimitFilter, UsernamePasswordAuthenticationFilter::class.java)
         return http.build()
     }
 }

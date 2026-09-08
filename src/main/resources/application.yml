@@ -20,4 +20,7 @@ app:
   jwt:
     secret: "change-this-to-a-long-random-string-at-least-32-characters-for-hs256"
     expiration-ms: 86400000
-#debug: true
+
+  rate-limit:
+    max-requests: 100
+    window-seconds: 60
